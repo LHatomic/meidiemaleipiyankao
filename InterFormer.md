@@ -224,16 +224,291 @@ def build_vocab(df):
 3.封装性好：把 “创建字典” 和 “更新字典” 的逻辑放在一起，结构更清晰。
 
 
+### 核心处理+保存
+
+---一个新的函数：process_one_sample (502)(大大)（比八不）
+
+---把前面所有辅助函数串起来，处理一条原始数据，输出一个干净的字典。这是一个"胶水函数"，把零件组装成成品。\\\
+
+```Python
+def process_one_sample(row):
+    action_type = int(row['label'][0]['action_type'])
+    label = 1.0 if action_type == 1 else 0.0
+
+    item_id = int(row['item_id'])
+
+    item_feat_dict = extract_feat_dict(row['item_feature'])
+    item_sparse = extract_sparse_feats(item_feat_dict, ITEM_SPARSE_FEAT_IDS)
+
+    user_feat_dict = extract_feat_dict(row['user_feature'])
+    user_sparse = extract_sparse_feats(user_feat_dict, USER_SPARSE_FEAT_IDS)
+
+    seq = row['seq_feature']
+    action_seq, action_seq_len = extract_seq_feats(
+        seq['action_seq'], ACTION_SEQ_FEAT_IDS, MAX_ACTION_SEQ_LEN)
+    content_seq, content_seq_len = extract_seq_feats(
+        seq['content_seq'], CONTENT_SEQ_FEAT_IDS, MAX_CONTENT_SEQ_LEN)
+    item_seq, item_seq_len = extract_seq_feats(
+        seq['item_seq'], ITEM_SEQ_FEAT_IDS, MAX_ITEM_SEQ_LEN)
+
+    timestamp = int(row['timestamp'])
+
+    return {
+        'item_id': item_id,
+        'item_sparse': np.array(item_sparse, dtype=np.int64),
+        'user_sparse': np.array(user_sparse, dtype=np.int64),
+        'action_seq': action_seq,
+        'action_seq_len': action_seq_len,
+        'content_seq': content_seq,
+        'content_seq_len': content_seq_len,
+        'item_seq': item_seq,
+        'item_seq_len': item_seq_len,
+        'label': label,
+        'timestamp': timestamp,
+    }
+
+```
+
+---[还是像背单词一样，看英文知道对应的中文意思是什么就行。
+    阅读短文就像阅读代码，我只要知道这篇文章讲的大概是个什么内容，整体先后是按照什么逻辑顺序串连起来的就足够用了。]
 
 
+---让我们提高速度，浏览一下这个胶水粘起来的过程。
+
+---第二个新函数，preprocess_and_save (读取、构建词表、逐样本处理、排序划分、保存)
+
+```Python
+def preprocess_and_save(parquet_path, save_dir="interformer_data", train_ratio=0.8):
+    os.makedirs(save_dir, exist_ok=True)
+
+    # 1. 读取
+    df = pd.read_parquet(parquet_path)
+
+    # 2. 构建 vocab
+    vocab = build_vocab(df)
+
+    # 3. 逐样本处理
+    all_samples = []
+    for idx in range(len(df)):
+        sample = process_one_sample(df.iloc[idx])
+        all_samples.append(sample)
+        if (idx + 1) % 200 == 0:
+            print(f"      已处理 {idx+1}/{len(df)}")
+
+    # 4. 按时间排序 → 划分
+    all_samples.sort(key=lambda x: x['timestamp'])
+    split_idx = int(len(all_samples) * train_ratio)
+    train_samples = all_samples[:split_idx]
+    val_samples = all_samples[split_idx:]
+
+    # 5. 保存
+    torch.save(vocab, os.path.join(save_dir, "vocab.pt"))
+    torch.save(train_samples, os.path.join(save_dir, "train_data.pt"))
+    torch.save(val_samples, os.path.join(save_dir, "val_data.pt"))
+    torch.save(config, os.path.join(save_dir, "config.pt"))
+    ...
+
+```
+
+---读取和构建vocab不用多说，从第三步逐样本处理开始：
+```Python
+def preprocess_and_save(parquet_path, save_dir="interformer_data", train_ratio=0.8):
+    os.makedirs(save_dir, exist_ok=True)
+"""
+3 个入参说明：
+【parquet_path】：必填，你的原始数据文件路径。【parquet】是大数据场景常用的列式存储格式，比 【csv】 体积更小、读取速度更快，【pandas】 原生支持。
+【save_dir】：选填，处理好的文件保存的文件夹，默认叫【interformer_data】，对应你的模型名称。
+【train_ratio=0.8】：选填，训练集占总数据的比例，默认 80% 数据用来训练模型，剩下 20% 用来验证效果，是机器学习的常规划分比例。
+【os.makedirs(save_dir, exist_ok=True)】：创建保存用的文件夹。【exist_ok=True】是工程常用写法：如果文件夹已经存在，就不报错、直接复用；不存在就新建，避免重复运行代码时因为文件夹已存在而崩溃。
+
+"""
+```
+
+```Python
+
+# 3. 逐样本处理
+all_samples = []
+for idx in range(len(df)):
+    sample = process_one_sample(df.iloc[idx])
+    all_samples.append(sample)
+    if (idx + 1) % 200 == 0:
+        print(f"    已处理 {idx+1}/{len(df)}")
+"""
+这一步的核心是：把表格里的每一行数据，处理成模型能直接读取的标准格式，统一存起来。
+【all_samples = []】：先创建一个空列表，用来装所有处理好的样本。
+【for idx in range(len(df))】：循环遍历表格的每一行，idx是行号，从 0 到总行数 - 1。
+【sample = process_one_sample(df.iloc[idx])】：
+【df.iloc[idx]】：取出表格里第idx行的完整数据；
+【process_one_sample】是配套的单样本处理函数，作用是把单行原始数据，转换成模型需要的格式。
+【all_samples.append(sample)】：把处理好的单条样本，添加到总列表里。
+最后的if判断：进度提示功能。如果数据量很大，循环会跑很久，这段代码每处理 200 条样本，就打印一次当前进度，让你知道程序没有卡死，实时看到处理进度。
+
+"""
+```
+
+```Py
+
+# 4. 按时间排序 → 划分
+all_samples.sort(key=lambda x: x['timestamp'])
+split_idx = int(len(all_samples) * train_ratio)
+train_samples = all_samples[:split_idx]
+val_samples = all_samples[split_idx:]
 
 
+```
+
+---这是时序模型 / 推荐系统最核心的规范操作，必须重点理解：
+【all_samples.sort(key=lambda x: x['timestamp'])】：把所有样本，按照【timestamp】（时间戳）从小到大排序，也就是按「从早到晚」的时间顺序排列。
+
+```Py
+"""
+为什么必须按时间划分？
+时序推荐模型的目标是「用用户过去的行为，预测未来的行为」，如果随机划分数据集，会把未来的数据放到训练集里，让模型提前 “看到答案”，训练出来的效果是虚假的，上线后完全不能用。按时间划分是时序任务的铁则。
+划分逻辑：
+【split_idx】：计算划分的分界点，比如总共有 10000 条样本，【train_ratio=0.8】，分界点就是 8000；
+【train_samples】：前 80% 的样本（时间更早的），作为训练集，给模型学习规律；
+【val_samples】：后 20% 的样本（时间更晚的），作为验证集，用来测试模型在 “未来数据” 上的真实效果，避免过拟合。
+
+"""
+```
+
+---读取原始 parquet 数据 → 构建特征词表 → 逐行处理成模型标准格式 → 按时间合规划分训练 / 验证集 → 保存所有文件，供后续训练直接使用
+
+### Dataset + DataLoader
+
+--InterFormerDataset--
+```Py
+"""---来点小粑粑：
+item_id：目标商品 ID，模型要预测用户对这个商品的行为。
+item_sparse：商品的离散特征（比如品类、品牌）。
+user_sparse：用户的离散特征（比如性别、年龄、城市）。
+action_seq：用户历史行为序列（比如用户之前点击过的商品 ID 序列）。
+action_seq_len：这个行为序列的真实长度（用来做 padding mask）。
+content_seq：用户浏览 / 交互过的内容序列（比如文章、视频 ID）。
+content_seq_len：内容序列的真实长度。
+item_seq：用户交互过的商品序列（和 action_seq 可能是同一套，也可能是不同的）。
+item_seq_len：商品序列的真实长度。
+label：标签（比如用户是否点击了目标商品，0 或 1；或者用户的评分）。
+"""
+```
+
+---这是一个PyTorch 标准的 Dataset 类，专门用来把你上一步预处理好的推荐系统数据，包装成 PyTorch 模型训练能直接吃的格式。只有包装成这种格式，后面的 DataLoader 才能帮你自动做分批次、打乱顺序、并行加载这些训练必备操作。
+
+```Py
+"""
+PyTorch Dataset 是什么？
+先铺垫一个基础概念：
+PyTorch 训练模型的标准流程是：
+数据文件 → Dataset → DataLoader → 模型训练
+Dataset：负责定义 “如何获取一条样本”，是一个抽象接口，你必须继承它并实现固定的几个方法。
+DataLoader：在 Dataset 的基础上，帮你自动做分批次（batch）、打乱（shuffle）、多线程加载，是训练的 “数据搬运工”。
 
 
+"""
+```
+
+```Py
+class InterFormerDataset(Dataset): #1. 类定义与继承
+
+"""
+InterFormerDataset：这是你自定义的数据集类名，对应你的模型 InterFormer，一看就是专门为这个模型定制的。
+(Dataset)：表示这个类继承了 PyTorch 自带的 torch.utils.data.Dataset 基类。
+继承之后，你的类就拥有了 Dataset 的所有特性，DataLoader 才能识别它。
+继承的硬性要求：必须实现 __init__、__len__、__getitem__ 这三个方法。
 
 
+"""
+```
+
+```Py
+
+def __init__(self, samples):
+    self.samples = samples  #__init__ 初始化方法
 
 
+```
+
+```Py
+def __len__(self):
+    return len(self.samples) #__len__ 方法
+
+"""这个方法告诉 PyTorch：你的数据集总共有多少条样本。
+比如你的 train_data.pt 里有 8000 条样本，调用 len(dataset) 就会返回 8000。
+DataLoader 分批次的时候，会用这个值来计算一个 epoch 有多少个 batch。"""
+```
+
+核心来喽！！！！！小飞棍来喽！！！！乐迪起飞咯！！！！
+```Py
+def __getitem__(self, idx):
+    s = self.samples[idx]
+    return {
+        'item_id':           torch.tensor(s['item_id'], dtype=torch.long),
+        'item_sparse':       torch.tensor(s['item_sparse'], dtype=torch.long),
+        'user_sparse':       torch.tensor(s['user_sparse'], dtype=torch.long),
+        'action_seq':        torch.tensor(s['action_seq'], dtype=torch.long),
+        'action_seq_len':    torch.tensor(s['action_seq_len'], dtype=torch.long),
+        'content_seq':       torch.tensor(s['content_seq'], dtype=torch.long),
+        'content_seq_len':   torch.tensor(s['content_seq_len'], dtype=torch.long),
+        'item_seq':          torch.tensor(s['item_seq'], dtype=torch.long),
+        'item_seq_len':      torch.tensor(s['item_seq_len'], dtype=torch.long),
+        'label':             torch.tensor(s['label'], dtype=torch.float32),
+    }
+
+
+```
+
+---这个方法是 【Dataset】 的核心：当你用 【dataset[idx]】 取第 【idx】 条样本时，它会返回模型需要的、格式正确的数据。
+
+
+---假设你已经有了预处理好的训练数据，完整使用流程是这样的：
+```Py
+# 1. 加载预处理好的数据
+train_samples = torch.load("interformer_data/train_data.pt")
+val_samples = torch.load("interformer_data/val_data.pt")
+
+# 2. 创建 Dataset 对象
+train_dataset = InterFormerDataset(train_samples)
+val_dataset = InterFormerDataset(val_samples)
+
+# 3. 用 DataLoader 包装 Dataset
+from torch.utils.data import DataLoader
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
+val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4)
+
+# 4. 训练时直接迭代 DataLoader
+for batch in train_loader:
+    # batch 就是一个字典，每个值都是一个 batch_size 维度的张量
+    item_id = batch['item_id']
+    label = batch['label']
+    # 喂给模型计算损失...
+
+```
+
+---load_dataloaders--
+作用：从 .pt 文件加载数据，创建 DataLoader。
+
+```Py
+def load_dataloaders(save_dir="interformer_data", batch_size=32):
+    vocab = torch.load(os.path.join(save_dir, "vocab.pt"), weights_only=False)
+    train_samples = torch.load(os.path.join(save_dir, "train_data.pt"), weights_only=False)
+    val_samples = torch.load(os.path.join(save_dir, "val_data.pt"), weights_only=False)
+    config = torch.load(os.path.join(save_dir, "config.pt"), weights_only=False)
+
+    train_loader = DataLoader(
+        InterFormerDataset(train_samples),
+        batch_size=batch_size, shuffle=True, num_workers=0, drop_last=True
+    )
+    val_loader = DataLoader(
+        InterFormerDataset(val_samples),
+        batch_size=batch_size, shuffle=False, num_workers=0, drop_last=False
+    )
+    return train_loader, val_loader, vocab, config
+
+```
+
+--预处理到此--
+
+从嵌套的 parquet 结构中，把每条样本的特征提取为固定形状的 numpy 数组，保存为 .pt 文件，供模型训练时直接加载。
 
 
 
