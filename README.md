@@ -51,136 +51,42 @@ def extract_feat_dict(feat_array):
             result[fid] = 0
     return result
 ```
-# HyFormer 全局总览 + 预处理详解
+-np.array(arr, dtype=np.int64)：把一个普通 Python 列表转成 NumPy 数组，并指定数据类型为 64 位整数。NumPy 数组比 Python 列表快得多，是数值计算的标准工具。
 
----
+### 辅助函数（二）：extract_sparse_feats（按顺序取值组成列表）
 
-## 一、全局快速总览
+-在上个步骤建成的字典里，按照指定顺序取出值组成列表。
+-如果某个指定的ID顺序不存在，就默认为0.
+-feat_dict.get(fid, default)：字典的 get 方法。
 
-HyFormer 是三个模型中架构最独特的一个。它既不像 InterFormer 那样用三个 Arch 循环交互，也不像 OneTrans 那样把所有东西塞进一个 Transformer，而是采用了**"query 向序列提问"**的 Decoder 架构。
-
-三个模型的核心哲学一句话概括：
-
+```Python
+[int(feat_dict.get(fid, default)) for fid in feat_ids]
+"""列表推导式"""
 ```
-InterFormer:  序列和非序列分开维护，通过中间摘要交换信息
-OneTrans:     所有特征统一成 token，塞进同一个 Transformer
-HyFormer:     生成少量 query token，向序列做 cross-attention 提取信息
-```
-
-代码同样分为 4 个文件/阶段：
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│ 文件 1: 数据预处理                                            │
-│   ★ 三类序列独立保留，不做时间戳合并（论文明确反对合并）         │
-├──────────────────────────────────────────────────────────────┤
-│ 文件 2: 模型定义                                              │
-│   ★ Query Generation + Cross-Attention Decoding               │
-│   ★ MLP-Mixer 风格的 Query Boosting                           │
-│   ★ SwiGLU 序列编码                                          │
-├──────────────────────────────────────────────────────────────┤
-│ 文件 3: 训练与评估                                            │
-│   与 OneTrans 完全一样（BCEWithLogitsLoss）                    │
-├──────────────────────────────────────────────────────────────┤
-│ 文件 4: 运行训练                                              │
-│   多了参数分布统计和结构概览打印                                │
-└──────────────────────────────────────────────────────────────┘
+【相互等价】
+```Python
+result = []
+for fid in feat_ids:
+    result.append(int(feat_dict.get(fid, default)))
+return result
 ```
 
-三个模型的预处理策略对比：
+-关键在于：【----for---变量---in---可迭代对象】。
 
-| 对比点 | InterFormer | OneTrans | HyFormer |
-|--------|-------------|----------|----------|
-| 非序列特征 | 14+41 个 sparse ID | 同左 | 同左 |
-| 序列处理方式 | 三类各自独立填充 | 按时间戳交错合并 | ★ 三类各自独立填充 |
-| 序列列数 | 各自不同 (9/7/11) | 统一为 11 列 | ★ 各自不同 (9/7/11) |
-| 序列最大长度 | 各 200 步 | 合并后 500 步 | 各 200 步 |
-| 时间戳 | 不保留 | 用于排序后丢弃 | ★ 只用于截断，不保留 |
-| 输出字段数 | 多（3 组序列×2） | 少（1 组合并序列） | 多（3 组序列×2） |
 
-HyFormer 的预处理看起来和 InterFormer 很像（都是三类序列独立），但底层函数不同——HyFormer 用了和 OneTrans 类似的 `extract_one_seq`（读取时间戳用于截断），而 InterFormer 用的是没有时间戳的 `extract_seq_feats`。
 
----
 
-## 二、文件 1：数据预处理 — 详解
 
-### 总览
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  模块 1: 特征配置                                            │
-│    与 InterFormer 几乎一样，新增每类序列的列数常量              │
-├─────────────────────────────────────────────────────────────┤
-│  模块 2: 辅助函数（4 个）                                     │
-│    extract_feat_dict    → 完全复用                            │
-│    extract_sparse_feats → 完全复用                            │
-│    ★ extract_one_seq    → 新函数，独立序列提取+左填充          │
-│    build_vocab          → 完全复用                            │
-├─────────────────────────────────────────────────────────────┤
-│  模块 3: 逐样本处理                                          │
-│    process_one_sample   → 三类序列独立提取，不合并              │
-├─────────────────────────────────────────────────────────────┤
-│  模块 4: 预处理主流程                                         │
-│    preprocess_and_save  → 多了三个序列的 shape 一致性检查       │
-├─────────────────────────────────────────────────────────────┤
-│  模块 5: Dataset + DataLoader                                │
-│    HyFormerDataset      → 字段和 InterFormer 类似             │
-│    load_dataloaders     → 结构相同                            │
-└─────────────────────────────────────────────────────────────┘
-```
 
-标 ★ 的是重点讲解的部分。由于大部分函数和前两个模型相同，我只讲有差异的地方。
 
----
 
-### 模块 1：特征配置
 
-```python
-# 和前两个模型完全一样的部分
-ITEM_SPARSE_FEAT_IDS = [...]
-USER_SPARSE_FEAT_IDS = [...]
-ACTION_SEQ_FEAT_IDS = [19, 20, 21, 22, 23, 24, 25, 26, 27]   # 9 个
-ACTION_SEQ_TS_ID = 28
-CONTENT_SEQ_FEAT_IDS = [42, 43, 44, 45, 46, 47, 48]           # 7 个
-CONTENT_SEQ_TS_ID = 41
-ITEM_SEQ_FEAT_IDS = [30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 49]  # 11 个
-ITEM_SEQ_TS_ID = 29
 
-# 和 InterFormer 一样的最大长度
-MAX_ACTION_SEQ_LEN = 200
-MAX_CONTENT_SEQ_LEN = 200
-MAX_ITEM_SEQ_LEN = 200
 
-# ★ HyFormer 新增：显式声明每类序列的列数
-N_ACTION_FEAT_COLS = len(ACTION_SEQ_FEAT_IDS)    # 9
-N_CONTENT_FEAT_COLS = len(CONTENT_SEQ_FEAT_IDS)   # 7
-N_ITEM_FEAT_COLS = len(ITEM_SEQ_FEAT_IDS)          # 11
-```
 
-和前两个模型的对比：
 
-```
-InterFormer:  MAX_ACTION_SEQ_LEN = 200 (各自独立)
-              没有显式声明列数
 
-OneTrans:     MAX_MERGED_SEQ_LEN = 500 (合并后)
-              GLOBAL_N_SEQ_FEAT_COLS = 11 (统一列数)
-
-HyFormer:     MAX_ACTION_SEQ_LEN = 200 (各自独立)
-              N_ACTION_FEAT_COLS = 9   (各自列数)
-              N_CONTENT_FEAT_COLS = 7
-              N_ITEM_FEAT_COLS = 11
-```
-
-HyFormer 不需要统一列数，因为三类序列始终独立处理，各用各的矩阵。
-
----
-
-### 模块 2：辅助函数
-
-`extract_feat_dict`、`extract_sparse_feats`、`build_vocab` 和前两个模型完全一样，跳过。
-
-#### `extract_one_seq` — 独立序列提取 + 左填充
 
 ```python
 def extract_one_seq(seq_data, feat_ids, ts_id, max_len):
