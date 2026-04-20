@@ -73,11 +73,36 @@ return result
 
 -关键在于：【----for---变量---in---可迭代对象】。
 
+### 辅助函数（三）：extract_seq_feats（-按特征维度储存转化成按时间步*特征维度的矩阵-做截断-左填充）【复杂】
 
+-关于预处理的部分，我们其实只需要理解其中的逻辑就可以，大致知道预处理的整体架构在干些什么，其中对于各类函数的使用属于Python课程，重点看有关于数学思想建模的地方。就像鸡蛋壳里面的蛋清，蛋清里面还有蛋黄，论营养我们还得着重看蛋黄部分。
 
+-那么，我们大致浏览一遍这个最复杂的辅助函数的三段功能都是怎么构造实现的。
 
+```Python
+"""收集原始数据"""
+feat_map = {}
+for feat in seq_data:
+    fid = int(feat['feature_id'])
+    if fid in feat_ids:                        # 只要我们关心的特征
+        arr = feat.get('int_array', None)
+        if arr is not None:
+            feat_map[fid] = np.array(arr, dtype=np.int64)
+        else:
+            feat_map[fid] = np.array([], dtype=np.int64)
+```
 
+-其实显而易见，无论是输入还是输出结果，核心还是在于[for---in---]遍历。遍历原始序列数据，把需要的特征 ID 对应的数组收集到 [at_map]字典中。
 
+```Python
+"""处理空数据的边界情况"""
+if len(feat_map) == 0:
+    return np.zeros((max_len, len(feat_ids)), dtype=np.int64), 0
+```
+
+-如果做项目时候，不考虑空数据的处理问题，会boom。因此要考虑全面。在这里是：如果该样本没有任何序列数据，直接返回一个全零矩阵和长度 0。|||
+\\\np.zeros((max_len, len(feat_ids)), dtype=np.int64)：创建一个形状为 (max_len, 特征数) 的全零矩阵
+\\\-有一点说明：（ x , y ）:x{矩阵的行数} ；  y{矩阵的列数}。
 
 
 
