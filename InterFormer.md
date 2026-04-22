@@ -514,66 +514,6 @@ def load_dataloaders(save_dir="interformer_data", batch_size=32):
 
 
 
-```python
-def extract_one_seq(seq_data, feat_ids, ts_id, max_len):
-    feat_map = {}
-    ts_arr = None
-
-    for feat in seq_data:
-        fid = int(feat['feature_id'])
-        arr = feat.get('int_array', None)
-        if arr is None:
-            continue
-        arr = np.array(arr, dtype=np.int64)
-        if fid == ts_id:
-            ts_arr = arr
-        elif fid in feat_ids:
-            feat_map[fid] = arr
-
-    n_feat = len(feat_ids)
-    padded = np.zeros((max_len, n_feat), dtype=np.int64)
-
-    # 空序列
-    if ts_arr is None or len(ts_arr) == 0:
-        return padded, 0
-
-    # 截取最近 max_len 条
-    actual_len = len(ts_arr)
-    start = max(0, actual_len - max_len)
-    kept_len = min(actual_len, max_len)
-
-    raw_feats = np.zeros((kept_len, n_feat), dtype=np.int64)
-    for col_idx, fid in enumerate(feat_ids):
-        if fid in feat_map:
-            raw_feats[:, col_idx] = feat_map[fid][start:start + kept_len]
-
-    # 左填充
-    pad_offset = max_len - kept_len
-    padded[pad_offset:] = raw_feats
-
-    return padded, kept_len
-```
-
-**作用**：提取单类序列的特征矩阵，截断到最大长度，左填充。
-
-这个函数可以看作 InterFormer 的 `extract_seq_feats` 和 OneTrans 的 `extract_one_seq_with_ts` 的**混合体**：
-
-```
-InterFormer extract_seq_feats:
-  ✓ 截断 + 左填充
-  ✗ 不读取时间戳
-  ✓ 输出固定长度矩阵
-
-OneTrans extract_one_seq_with_ts:
-  ✓ 截断
-  ✓ 读取时间戳
-  ✗ 不做填充（变长输出）
-
-HyFormer extract_one_seq:
-  ✓ 截断 + 左填充        ← 取自 InterFormer
-  ✓ 读取时间戳（用于确定截断位置） ← 取自 OneTrans
-  ✓ 输出固定长度矩阵      ← 取自 InterFormer
-```
 
 为什么要读取时间戳？虽然 HyFormer 不合并序列，但时间戳仍然用于确认截断——确保 `ts_arr` 存在时才处理（`if ts_arr is None or len(ts_arr) == 0`），因为时间戳的长度就是序列的实际步数。
 
